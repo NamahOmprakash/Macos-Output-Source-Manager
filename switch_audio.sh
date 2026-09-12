@@ -14,10 +14,26 @@ set -eo pipefail
 
 DEFAULT_CONFIG="$HOME/.macos_audio_scheduler/schedules.json"
 
-# Find SwitchAudioSource binary
-SWITCH_BIN=$(command -v SwitchAudioSource || echo "/opt/homebrew/bin/SwitchAudioSource")
-if [[ ! -x "$SWITCH_BIN" ]]; then
-    echo "Error: SwitchAudioSource not found. Please install: brew install switchaudio-osx" >&2
+find_switch_bin() {
+    if command -v SwitchAudioSource &>/dev/null; then
+        command -v SwitchAudioSource
+    elif [[ -x "/opt/homebrew/bin/SwitchAudioSource" ]]; then
+        echo "/opt/homebrew/bin/SwitchAudioSource"
+    elif [[ -x "/usr/local/bin/SwitchAudioSource" ]]; then
+        echo "/usr/local/bin/SwitchAudioSource"
+    elif [[ -x "$HOME/bin/SwitchAudioSource" ]]; then
+        echo "$HOME/bin/SwitchAudioSource"
+    else
+        echo "SwitchAudioSource"
+    fi
+}
+
+SWITCH_BIN=$(find_switch_bin)
+
+if [[ "${1:-}" != "setup" && ! -x "$SWITCH_BIN" ]]; then
+    echo "Error: SwitchAudioSource not found." >&2
+    echo "To install dependencies automatically on any Mac, run: $0 setup" >&2
+    echo "Or install via Homebrew: brew install switchaudio-osx blackhole-2ch" >&2
     exit 1
 fi
 
@@ -515,6 +531,23 @@ case "${1:-}" in
         shift
         run_single_schedule "$@"
         ;;
+    setup)
+        echo "=========================================================="
+        echo " Setting up macOS Audio Output Manager dependencies..."
+        echo "=========================================================="
+        if ! command -v brew &>/dev/null; then
+            echo "Error: Homebrew is required for automatic installation." >&2
+            echo "Please install Homebrew from https://brew.sh first, then re-run: $0 setup" >&2
+            exit 1
+        fi
+        echo "1/2 Installing switchaudio-osx (CLI audio switching engine)..."
+        brew install switchaudio-osx
+        echo "2/2 Installing blackhole-2ch (silent virtual HAL audio driver)..."
+        brew install blackhole-2ch
+        echo "Restarting coreaudiod to register the new HAL driver..."
+        sudo killall coreaudiod 2>/dev/null || true
+        echo "Setup complete! The 'Virtual' audio device is now ready to use on this Mac."
+        ;;
     daemon)
         shift
         run_daemon "$@"
@@ -523,6 +556,7 @@ case "${1:-}" in
         echo "macOS Audio Output Switcher & Scheduler (Battery-Optimized & Secure)"
         echo ""
         echo "Commands:"
+        echo "  $0 setup                                           Install required dependencies via Homebrew"
         echo "  $0 list                                            List detected audio output devices (incl. Virtual)"
         echo "  $0 current                                         Display current output device and volume"
         echo "  $0 switch \"<Device>\"                               Switch to device immediately"

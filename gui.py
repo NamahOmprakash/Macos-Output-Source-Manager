@@ -30,9 +30,18 @@ from typing import Any
 
 import ctypes
 
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.macos_audio_scheduler/schedules.json")
-DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-SWITCH_BIN = shutil.which("SwitchAudioSource") or "/opt/homebrew/bin/SwitchAudioSource"
+def find_switch_bin() -> str:
+    for candidate in [
+        shutil.which("SwitchAudioSource"),
+        "/opt/homebrew/bin/SwitchAudioSource",
+        "/usr/local/bin/SwitchAudioSource",
+        os.path.expanduser("~/bin/SwitchAudioSource"),
+    ]:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("SwitchAudioSource") or "/opt/homebrew/bin/SwitchAudioSource"
+
+SWITCH_BIN = find_switch_bin()
 
 VIRTUAL_NAME = "Virtual"
 VIRTUAL_LABEL = "Virtual (Block: Plays no sound)"

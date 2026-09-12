@@ -31,15 +31,25 @@ It automatically switches your Mac's default audio output device (speakers, head
 
 ---
 
-## Prerequisites
+## Prerequisites & 1-Command Setup
 
-1. **macOS** (Apple Silicon or Intel).
-2. **`switchaudio-osx`**:
-   Install via Homebrew:
-   ```bash
-   brew install switchaudio-osx
-   ```
-3. **Python 3** (macOS built-in or Homebrew Python with standard Tkinter support).
+The manager requires **`switchaudio-osx`** (for CLI device switching) and **`blackhole-2ch`** (the open-source HAL driver that enables the genuine silent `Virtual` device in macOS System Settings & Control Center).
+
+### Automated Setup (Recommended)
+Run the built-in setup command to install all dependencies automatically via Homebrew:
+```bash
+./switch_audio.sh setup
+```
+
+### Manual Installation
+If you prefer installing manually via Homebrew:
+```bash
+brew install switchaudio-osx blackhole-2ch
+```
+
+> [!NOTE]
+> **Why is BlackHole required for the Virtual device?**
+> macOS CoreAudio security strictly requires any audio output device appearing in System Settings & Control Center to be an authenticated HAL plug-in driver in `/Library/Audio/Plug-Ins/HAL/`. `BlackHole 2ch` acts as the silent loopback sink. If BlackHole is not installed on a machine, the app automatically falls back to `Steam Streaming Speakers` (if Valve Steam is installed) or software-level volume locking.
 
 ---
 
