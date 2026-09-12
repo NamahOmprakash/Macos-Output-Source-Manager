@@ -28,11 +28,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
+import ctypes
+
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.macos_audio_scheduler/schedules.json")
 DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 SWITCH_BIN = shutil.which("SwitchAudioSource") or "/opt/homebrew/bin/SwitchAudioSource"
 
 VIRTUAL_NAME = "Virtual"
+VIRTUAL_LABEL = "Virtual (Block: Plays no sound)"
 
 
 # ==============================================================================
@@ -51,11 +54,47 @@ def find_virtual_sink_device() -> str | None:
     return None
 
 
+def ensure_virtual_device_exists() -> str:
+    """Ensures a genuine macOS CoreAudio output device literally named 'Virtual' exists in macOS System Settings & Control Center."""
+    try:
+        res = subprocess.run([SWITCH_BIN, "-a", "-t", "output"], capture_output=True, text=True)
+        lines = [line.strip() for line in res.stdout.splitlines()]
+        if "Virtual" in lines:
+            return "Virtual"
+    except Exception:
+        pass
+
+    try:
+        import Foundation
+        import objc
+
+        coreaudio = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
+        AudioHardwareCreateAggregateDevice = coreaudio.AudioHardwareCreateAggregateDevice
+        AudioHardwareCreateAggregateDevice.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        AudioHardwareCreateAggregateDevice.restype = ctypes.c_uint32
+
+        # Subdevice UID for BlackHole HAL driver
+        target_uid = "BlackHole2ch_UID"
+        desc = {
+            "name": "Virtual",
+            "uid": "org.soundblock.virtual.v2",
+            "subdevices": [{"uid": target_uid}],
+            "master": target_uid
+        }
+        cf_desc = Foundation.NSDictionary.dictionaryWithDictionary_(desc)
+        out_id = ctypes.c_uint32(0)
+        err = AudioHardwareCreateAggregateDevice(objc.pyobjc_id(cf_desc), ctypes.byref(out_id))
+        if err == 0:
+            return "Virtual"
+    except Exception:
+        pass
+
+    v_sink = find_virtual_sink_device()
+    return v_sink if v_sink else VIRTUAL_NAME
+
+
 def get_virtual_label() -> str:
-    sink = find_virtual_sink_device()
-    if sink:
-        return f"Virtual [{sink}] (Silent Block: Plays no sound)"
-    return "Virtual (Block: Plays no sound)"
+    return VIRTUAL_LABEL
 
 
 def is_virtual_target(name: str) -> bool:
@@ -67,8 +106,7 @@ def is_virtual_target(name: str) -> bool:
 def resolve_hw_target(name: str) -> str:
     """Resolves virtual label to actual underlying macOS output device name."""
     if is_virtual_target(name):
-        v_sink = find_virtual_sink_device()
-        return v_sink if v_sink else VIRTUAL_NAME
+        return ensure_virtual_device_exists()
     return name
 
 
@@ -81,14 +119,15 @@ def get_current_device() -> str:
 
 
 def get_available_devices() -> list[str]:
+    ensure_virtual_device_exists()
     v_label = get_virtual_label()
     devices = [v_label]
-    v_sink = find_virtual_sink_device()
     try:
         res = subprocess.run([SWITCH_BIN, "-a", "-t", "output"], capture_output=True, text=True, check=True)
         for line in res.stdout.strip().splitlines():
             line = line.strip()
-            if line and line not in devices and line != v_label:
+            # Do not duplicate Virtual label, and hide raw internal helper BlackHole from user dropdown
+            if line and line not in devices and line != v_label and line != "Virtual" and line != "BlackHole 2ch":
                 devices.append(line)
     except Exception:
         pass
@@ -101,9 +140,11 @@ def get_volume_state() -> tuple[int, bool]:
         cmd = 'set vol to output volume of (get volume settings)\nset isM to output muted of (get volume settings)\nreturn (vol as text) & "|" & (isM as text)'
         res = subprocess.run(["osascript", "-e", cmd], capture_output=True, text=True, check=True)
         v_str, m_str = res.stdout.strip().split("|")
+        if "missing" in v_str.lower() or not v_str.strip().isdigit():
+            return 0, True
         return int(v_str), (m_str.lower() == "true")
     except Exception:
-        return 50, False
+        return 0, True
 
 
 def set_volume_state(vol: int, muted: bool) -> None:
@@ -118,17 +159,14 @@ def mute_block() -> None:
 def switch_audio_device(name: str) -> bool:
     """Switches macOS audio output. If target is Virtual, routes to silent HAL driver and sets volume 0 muted."""
     if is_virtual_target(name):
-        v_sink = find_virtual_sink_device()
-        if v_sink:
-            try:
-                res = subprocess.run([SWITCH_BIN, "-s", v_sink, "-t", "output"], capture_output=True, text=True)
-                mute_block()
-                return res.returncode == 0
-            except Exception:
-                mute_block()
-                return False
-        mute_block()
-        return True
+        target_dev = ensure_virtual_device_exists()
+        try:
+            res = subprocess.run([SWITCH_BIN, "-s", target_dev, "-t", "output"], capture_output=True, text=True)
+            mute_block()
+            return res.returncode == 0
+        except Exception:
+            mute_block()
+            return False
     try:
         res = subprocess.run([SWITCH_BIN, "-s", name, "-t", "output"], capture_output=True, text=True)
         return res.returncode == 0

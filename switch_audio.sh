@@ -22,26 +22,29 @@ if [[ ! -x "$SWITCH_BIN" ]]; then
 fi
 
 VIRTUAL_NAME="Virtual"
+VIRTUAL_LABEL="Virtual (Block: Plays no sound)"
 
-find_virtual_sink() {
-    local dev
-    while IFS= read -r dev; do
-        if [[ "$dev" == "BlackHole 2ch" || "$dev" == "Steam Streaming Speakers" || "$dev" == "BlackHole 16ch" ]]; then
-            echo "$dev"
-            return 0
-        fi
-    done < <("$SWITCH_BIN" -a -t output 2>/dev/null)
-    return 1
+ensure_virtual_device() {
+    if "$SWITCH_BIN" -a -t output 2>/dev/null | grep -qx "Virtual"; then
+        echo "Virtual"
+        return 0
+    fi
+    python3 -c "
+import Foundation, objc, ctypes
+coreaudio = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
+AudioHardwareCreateAggregateDevice = coreaudio.AudioHardwareCreateAggregateDevice
+AudioHardwareCreateAggregateDevice.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+AudioHardwareCreateAggregateDevice.restype = ctypes.c_uint32
+desc = {'name': 'Virtual', 'uid': 'org.soundblock.virtual.v2', 'subdevices': [{'uid': 'BlackHole2ch_UID'}], 'master': 'BlackHole2ch_UID'}
+cf_desc = Foundation.NSDictionary.dictionaryWithDictionary_(desc)
+out_id = ctypes.c_uint32(0)
+AudioHardwareCreateAggregateDevice(objc.pyobjc_id(cf_desc), ctypes.byref(out_id))
+" 2>/dev/null || true
+    echo "Virtual"
 }
 
 get_virtual_label() {
-    local sink
-    sink=$(find_virtual_sink || true)
-    if [[ -n "$sink" ]]; then
-        echo "Virtual [$sink] (Silent Block - Plays no sound)"
-    else
-        echo "Virtual (Block: Plays no sound)"
-    fi
+    echo "$VIRTUAL_LABEL"
 }
 
 is_virtual_target() {
@@ -55,9 +58,7 @@ is_virtual_target() {
 resolve_hw_target() {
     local t="$1"
     if is_virtual_target "$t"; then
-        local sink
-        sink=$(find_virtual_sink || true)
-        echo "${sink:-$VIRTUAL_NAME}"
+        ensure_virtual_device
     else
         echo "$t"
     fi
@@ -69,10 +70,8 @@ get_current() {
 
 list_devices() {
     get_virtual_label
-    local v_sink
-    v_sink=$(find_virtual_sink || true)
     while IFS= read -r line; do
-        if [[ -n "$line" ]]; then
+        if [[ -n "$line" && "$line" != "Virtual" && "$line" != "BlackHole 2ch" ]]; then
             echo "$line"
         fi
     done < <("$SWITCH_BIN" -a -t output 2>/dev/null)
@@ -81,11 +80,21 @@ list_devices() {
 # Query volume and mute state via AppleScript
 # Output: "VOL|MUTED" e.g. "50|false"
 get_volume_state() {
-    osascript -e '
-        set vol to output volume of (get volume settings)
-        set isMuted to output muted of (get volume settings)
-        return (vol as text) & "|" & (isMuted as text)
-    ' 2>/dev/null || echo "50|false"
+    local res
+    res=$(osascript -e '
+        try
+            set vol to output volume of (get volume settings)
+            set isMuted to output muted of (get volume settings)
+            return (vol as text) & "|" & (isMuted as text)
+        on error
+            return "0|true"
+        end try
+    ' 2>/dev/null || echo "0|true")
+    if [[ "$res" == *"missing"* ]]; then
+        echo "0|true"
+    else
+        echo "$res"
+    fi
 }
 
 set_volume_state() {
@@ -108,13 +117,10 @@ switch_device() {
         return 1
     fi
     if is_virtual_target "$target"; then
-        local v_sink
-        v_sink=$(find_virtual_sink || true)
+        local v_dev
+        v_dev=$(ensure_virtual_device)
         echo "[$(date +'%T')] Activating Virtual Sound Block (silent output)..."
-        if [[ -n "$v_sink" ]]; then
-            echo "[$(date +'%T')] Routing physical audio to virtual HAL driver: '$v_sink'"
-            "$SWITCH_BIN" -s "$v_sink" -t output
-        fi
+        "$SWITCH_BIN" -s "$v_dev" -t output || true
         mute_block
     else
         echo "[$(date +'%T')] Switching audio output to: '$target'"
