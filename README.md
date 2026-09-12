@@ -175,4 +175,4 @@ The schedule configurations are stored in human-readable JSON:
 
 ## License
 
-MIT License. Feel free to use and modify for personal and commercial projects.
+This project is licensed under a **Non-Commercial License** (Personal & Educational Use Only). Commercial use, resale, or monetization is strictly prohibited without prior written permission. See the [LICENSE](LICENSE) file for the full legal terms.
