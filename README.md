@@ -1,8 +1,11 @@
 # macOS Audio Output Source Manager & Scheduler
 
-An automated, battery-optimized audio output device scheduler and manager for macOS.
+[![Status: Do Not Use](https://img.shields.io/badge/STATUS-DO_NOT_USE-red.svg?style=for-the-badge)](#)
+[![Status: Broken](https://img.shields.io/badge/FUNCTIONALITY-DOES_NOT_WORK-critical.svg?style=for-the-badge)](#)
 
-It automatically switches your Mac's default audio output device (speakers, headphones, Bluetooth devices) on a schedule and **automatically restores your previous audio device and volume** once the schedule window ends. It also includes an active **Virtual Sound Block** and volume range clamping to override accidental GUI slider or keyboard shortcut changes.
+> [!CAUTION]
+> ### ⚠️ DO NOT USE — DOES NOT WORK
+> **This project is currently broken / experimental and does not work as intended. DO NOT USE.**
 
 ---
 
