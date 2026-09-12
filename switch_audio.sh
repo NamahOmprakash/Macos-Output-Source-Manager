@@ -41,20 +41,24 @@ VIRTUAL_NAME="Virtual"
 VIRTUAL_LABEL="Virtual (Block: Plays no sound)"
 
 ensure_virtual_device() {
-    if "$SWITCH_BIN" -a -t output 2>/dev/null | grep -qx "Virtual"; then
-        echo "Virtual"
-        return 0
-    fi
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     python3 -c "
-import Foundation, objc, ctypes
-coreaudio = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
-AudioHardwareCreateAggregateDevice = coreaudio.AudioHardwareCreateAggregateDevice
-AudioHardwareCreateAggregateDevice.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-AudioHardwareCreateAggregateDevice.restype = ctypes.c_uint32
-desc = {'name': 'Virtual', 'uid': 'org.soundblock.virtual.v2', 'subdevices': [{'uid': 'BlackHole2ch_UID'}], 'master': 'BlackHole2ch_UID'}
-cf_desc = Foundation.NSDictionary.dictionaryWithDictionary_(desc)
-out_id = ctypes.c_uint32(0)
-AudioHardwareCreateAggregateDevice(objc.pyobjc_id(cf_desc), ctypes.byref(out_id))
+import sys
+sys.path.insert(0, '$script_dir')
+try:
+    import coreaudio_backend as cab
+    cab.create_virtual_device()
+except Exception:
+    import Foundation, objc, ctypes
+    coreaudio = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
+    AudioHardwareCreateAggregateDevice = coreaudio.AudioHardwareCreateAggregateDevice
+    AudioHardwareCreateAggregateDevice.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    AudioHardwareCreateAggregateDevice.restype = ctypes.c_uint32
+    desc = {'name': 'Virtual', 'uid': 'org.soundblock.virtual.v3', 'private': 0, 'stacked': 0, 'subdevices': [{'uid': 'BlackHole2ch_UID'}], 'master': 'BlackHole2ch_UID'}
+    cf_desc = Foundation.NSDictionary.dictionaryWithDictionary_(desc)
+    out_id = ctypes.c_uint32(0)
+    AudioHardwareCreateAggregateDevice(objc.pyobjc_id(cf_desc), ctypes.byref(out_id))
 " 2>/dev/null || true
     echo "Virtual"
 }
@@ -331,8 +335,8 @@ run_single_schedule() {
                 fi
                 enforce_volume_constraints "$volume_mode" "$fixed_vol" "$min_vol" "$max_vol" "$is_virt" || true
             fi
-            # Active check interval: 0.2s for rapid snapback
-            sleep 0.2
+            # Active check interval: 0.05s for rapid snapback
+            sleep 0.05
         else
             if $active; then
                 echo "[$(date +'%T')] Window ended. Restoring original audio state..."
@@ -480,8 +484,8 @@ else:
                     fi
                     enforce_volume_constraints "$v_mode" "$f_vol" "$min_v" "$max_v" "$is_virt" || true
                 fi
-                # Active sleep: 0.2s for responsive override
-                sleep 0.2
+                # Active sleep: 0.05s for rapid snapback
+                sleep 0.05
                 continue
             elif [[ -n "$active_sched_id" ]]; then
                 echo "[$(date +'%T')] Active schedule window ended."
@@ -548,6 +552,20 @@ case "${1:-}" in
         sudo killall coreaudiod 2>/dev/null || true
         echo "Setup complete! The 'Virtual' audio device is now ready to use on this Mac."
         ;;
+    check-deps|--check-deps)
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        python3 -c "
+import sys
+sys.path.insert(0, '$script_dir')
+import coreaudio_backend as cab
+deps = cab.check_dependencies()
+print('Dependency Check:')
+print('  • SwitchAudioSource CLI :', 'Available' if deps.get('switchaudio') else 'Missing')
+print('  • BlackHole 2ch driver  :', 'Available' if deps.get('blackhole') else 'Missing')
+print('  • PyObjC framework      :', 'Available' if deps.get('pyobjc') else 'Missing')
+print('  • Accessibility access  :', 'Granted' if deps.get('accessibility') else 'Not Granted (needed for volume keys)')
+"
+        ;;
     daemon)
         shift
         run_daemon "$@"
@@ -557,6 +575,7 @@ case "${1:-}" in
         echo ""
         echo "Commands:"
         echo "  $0 setup                                           Install required dependencies via Homebrew"
+        echo "  $0 check-deps                                      Check availability of all dependencies"
         echo "  $0 list                                            List detected audio output devices (incl. Virtual)"
         echo "  $0 current                                         Display current output device and volume"
         echo "  $0 switch \"<Device>\"                               Switch to device immediately"

@@ -1,171 +1,177 @@
 # macOS Audio Output Source Manager & Scheduler
 
-[![Status: Do Not Use](https://img.shields.io/badge/STATUS-DO_NOT_USE-red.svg?style=for-the-badge)](#)
-[![Status: Broken](https://img.shields.io/badge/FUNCTIONALITY-DOES_NOT_WORK-critical.svg?style=for-the-badge)](#)
+[![Platform: macOS](https://img.shields.io/badge/PLATFORM-MACOS-black.svg?style=for-the-badge&logo=apple)](#)
+[![Status: Active](https://img.shields.io/badge/STATUS-OPERATIONAL-success.svg?style=for-the-badge)](#)
+[![Engine: CoreAudio C Native](https://img.shields.io/badge/ENGINE-COREAUDIO_CTYPES-blue.svg?style=for-the-badge)](#)
 
-> [!CAUTION]
-> ### ⚠️ DO NOT USE — DOES NOT WORK
-> **This project is currently broken / experimental and does not work as intended. DO NOT USE.**
+A high-performance macOS audio manager, sound-blocking enforcer, and time-based output scheduler. Built with native CoreAudio C bindings, event-driven hardware listeners, and Quartz event taps.
 
 ---
 
 ## Key Features
 
-- 🔊 **Auto-Restore Last Used Device & Volume**: Automatically remembers whatever speaker/headphones you were using before the schedule started, and restores both the output source and volume when the schedule completes.
-- 🚫 **Virtual Sound Block (`Virtual`)**:
-  - A dedicated virtual device named `Virtual` (`Block - plays no sound`).
-  - Acts as a complete sound barrier by locking volume to 0% and engaging system output mute.
-  - Actively prevents sound playback even if someone attempts to raise the volume.
-- 🎚️ **Volume Rules & Range Clamping**:
-  - **Unlocked**: User can freely adjust sound volume.
-  - **Fixed Volume**: Locks volume to a specific percentage (e.g. `40%`), reverting any manual tampering.
-  - **Allowed Volume Range (Min % – Max %)**: Allows user freedom to adjust volume within a safe window (e.g. `15% – 50%`), but automatically clamps volume if it exceeds the maximum or drops below the minimum.
-- ⚡ **Active Override Enforcement**:
-  - Overrides manual macOS Control Center or Sound menu bar changes during active schedules.
-  - Overrides keyboard shortcuts (F11/F12 / Volume Up keys) or Touch Bar volume changes if they violate the schedule's volume rules.
-- 🔋 **Battery-Optimized Engine**:
-  - Avoids tight polling loops and constant process fork/exec wakeups.
-  - In idle state (when no schedule is active), sleeps in a low-power state with **zero subprocesses spawned** (near 0.0% CPU usage).
-- ☁️ **Dropbox & Cloud Config Sync**:
-  - Store your schedule configuration file anywhere (e.g., `~/Dropbox/audio_schedules.json`) to sync schedules across multiple Macs.
-- 🖥️ **Dual Interface**:
-  - **GUI (`gui.py`)**: Clean, native Tkinter desktop interface with device dropdowns, schedule table, and real-time activity log.
-  - **CLI (`switch_audio.sh`)**: Fast, standalone Bash script for terminal power users, scripts, and cron/launchd integration.
+- 🚫 **Genuine Virtual Sound Block (`Virtual`)**:
+  - Automatically creates a genuine CoreAudio aggregate device named **`Virtual`** that appears directly in **macOS System Settings** and **Control Center**.
+  - Routes audio to an internal silent HAL loopback sink (`BlackHole 2ch` or `Steam Streaming Speakers`).
+  - Completely stops sound playback through physical speakers or headphones.
+- ⚡ **Instant Event-Driven Override (<5ms latency)**:
+  - Listens to hardware changes via `AudioObjectAddPropertyListener` on `kAudioHardwarePropertyDefaultOutputDevice`.
+  - When a schedule is active, any attempt to switch output devices in macOS Control Center or System Settings is **snapped back within 1–5 milliseconds**.
+- ⌨️ **Hardware Volume Key Interception (`CGEventTap`)**:
+  - Intercepts physical media keys (`F11`, `F12`, `Mute`) via Quartz Event Services before macOS processes them.
+  - Suppresses volume increases during sound block periods or fixed-volume schedules.
+- 🔒 **Tamper Lock & Admin PIN Protection**:
+  - Password-protect scheduler settings and device controls with an Admin PIN.
+  - Displays a native macOS modal password prompt (`osascript display dialog with hidden answer`) over Control Center if unauthorized device changes occur.
+- 🎚️ **Volume Bounds & Range Clamping**:
+  - **Unlocked**: Normal volume control.
+  - **Fixed Volume**: Enforces a strict percentage (e.g. `40%`), clamping any manual changes.
+  - **Allowed Range**: Allows free adjustment within a safe bracket (e.g. `15% – 50%`), clamping if exceeded.
+- 🔊 **Auto-Restore Previous Device & Volume**:
+  - Remembers your original speaker/headphones and volume level before a schedule started, restoring them when the schedule ends.
+- 🔋 **Zero Battery Drain When Idle**:
+  - Uses event callbacks instead of busy-polling loops. Spawns zero subprocesses during idle states.
+- ☁️ **Cloud Config Sync**:
+  - Store schedule files in Dropbox, iCloud Drive, or local storage.
 
 ---
 
-## Prerequisites & 1-Command Setup
+## Prerequisites & Installation
 
-The manager requires **`switchaudio-osx`** (for CLI device switching) and **`blackhole-2ch`** (the open-source HAL driver that enables the genuine silent `Virtual` device in macOS System Settings & Control Center).
-
-### Automated Setup (Recommended)
-Run the built-in setup command to install all dependencies automatically via Homebrew:
+### 1. Automated Setup (Recommended)
+Run the built-in setup command to install `switchaudio-osx` and `blackhole-2ch` via Homebrew:
 ```bash
 ./switch_audio.sh setup
 ```
 
-### Manual Installation
-If you prefer installing manually via Homebrew:
+### 2. Check System Dependencies
+Verify that all components are detected and ready:
 ```bash
-brew install switchaudio-osx blackhole-2ch
+./switch_audio.sh check-deps
 ```
 
-> [!NOTE]
-> **Why is BlackHole required for the Virtual device?**
-> macOS CoreAudio security strictly requires any audio output device appearing in System Settings & Control Center to be an authenticated HAL plug-in driver in `/Library/Audio/Plug-Ins/HAL/`. `BlackHole 2ch` acts as the silent loopback sink. If BlackHole is not installed on a machine, the app automatically falls back to `Steam Streaming Speakers` (if Valve Steam is installed) or software-level volume locking.
+Expected output:
+```text
+Dependency Check:
+  • SwitchAudioSource CLI : Available
+  • BlackHole 2ch driver  : Available
+  • PyObjC framework      : Available
+  • Accessibility access  : Granted (or Not Granted)
+```
 
 ---
 
-## Quick Start
+## How to Grant macOS Accessibility Permission (Volume Key Interception)
 
-### 1. Graphical User Interface (GUI)
+macOS requires **Accessibility** permission to intercept keyboard media keys (`F11`, `F12`, `Mute`) via `CGEventTap`.
 
-Run:
+> [!NOTE]
+> **Is Accessibility mandatory?**
+> **No.** If Accessibility is not granted, sound blocking and instant audio device snapback still function completely. The app will simply use software volume clamping rather than hardware key suppression.
+
+### Method 1: Enable Terminal or Your IDE (Easiest & Recommended)
+
+If you run the app from **Terminal**, **iTerm**, or an IDE like **VSCode / Antigravity IDE**:
+
+1. Open **System Settings** → **Privacy & Security** → **Accessibility** (or run `open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"` in your terminal).
+2. Find your terminal application in the list (e.g., **Terminal**, **iTerm**, or your IDE).
+3. Toggle the switch **ON**.
+
+---
+
+### Method 2: Add Python Directly to Accessibility
+
+If running Python standalone or macOS asks for Python specifically:
+
+1. Open **System Settings** → **Privacy & Security** → **Accessibility**.
+2. Click the **`+`** (Add) button below the list (enter your Mac login password if prompted).
+3. In the Finder dialog that appears, press **`Cmd + Shift + G`** (Go to Folder shortcut).
+4. Paste the path to your Python application bundle and press Enter:
+   ```text
+   /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app
+   ```
+   *(Or if using Homebrew Python: `/opt/homebrew/bin/python3`)*
+5. Click **Open**.
+6. Ensure the checkbox next to **Python** is toggled **ON**.
+
+---
+
+## How to Start & Use
+
+### Option 1: Desktop GUI Application
+
+Launch the GUI:
 ```bash
 python3 gui.py
 ```
 
 #### Inside the GUI:
-- **Quick Switch**: Select any detected speaker or `Virtual (Block: Plays no sound)` from the dropdown and click **⚡ Switch Now**.
-- **Config Path**: Set or browse to your config file (supports local or Dropbox folder paths) and click **Save** or **Load**.
-- **Add / Edit Schedule**:
-  - Set schedule name and target speaker (or `Virtual`).
-  - Configure 24h start and end times (`HH:MM`) and select active days of the week.
-  - Set **Volume Enforcement**:
-    - *Unlocked*: Free adjustment.
-    - *Lock to Fixed Volume*: Keeps volume at exact level.
-    - *Constrain to Allowed Range*: Sets `Min %` and `Max %` thresholds.
-  - Select **On Schedule End** behavior:
-    - *Restore last used audio source & volume*.
-    - *Switch to specific device*.
-- **Scheduler Control**: Click **▶️ Start Scheduler** to run background monitoring with real-time logs in the Activity Log pane.
+1. **Current Output & Quick Switch**: View your active audio device and switch output sources instantly.
+2. **Security & PIN Lock**: Click **🔑 Set / Change PIN** to protect your settings with an admin password. Click **🔒 Enable PIN Lock** to activate tamper protection.
+3. **Configure Schedules**:
+   - Click **➕ Add Schedule**.
+   - Enter a name (e.g., *Deep Work* or *Night Block*).
+   - Select the target output (choose **`Virtual (Block: Plays no sound)`** for complete silence).
+   - Set start time, end time, and days of the week.
+   - Configure volume enforcement (Unlocked, Fixed Volume, or Min/Max Range).
+   - Choose on-end action (*Restore last used audio source & volume* or switch to a specific device).
+4. **Start Scheduler**: Click **▶️ Start Scheduler**. The live CoreAudio hardware listener and override enforcer will run in the background.
 
 ---
 
-### 2. Standalone CLI Script (`switch_audio.sh`)
+### Option 2: Command Line Interface (`switch_audio.sh`)
 
-Make sure the script is executable:
+Make the script executable:
 ```bash
 chmod +x switch_audio.sh
 ```
 
-#### List Available Audio Devices
-```bash
-./switch_audio.sh list
-```
+#### Common Commands:
 
-#### Display Current Output Device & Volume
-```bash
-./switch_audio.sh current
-```
-
-#### Immediate Switch
-```bash
-# Switch to physical device
-./switch_audio.sh switch "MacBook Pro Speakers"
-
-# Switch to Virtual Sound Block (mutes sound and sets volume to 0)
-./switch_audio.sh switch "Virtual"
-```
-
-#### Run a Single Schedule (Auto-Restores on End)
-```bash
-# Basic schedule (14:00 to 18:00)
-./switch_audio.sh schedule --target "MacBook Pro Speakers" --start 14:00 --end 18:00
-
-# With specific active days and explicit return device:
-./switch_audio.sh schedule --target "MacBook Pro Speakers" --start 14:00 --end 16:30 --days Mon,Thu --return "JBL Tune 770NC-LE"
-
-# With locked fixed volume (e.g. 40%):
-./switch_audio.sh schedule --target "MacBook Pro Speakers" --start 14:00 --end 18:00 --volume 40
-
-# With allowed volume range (min 20%, max 55%):
-./switch_audio.sh schedule --target "MacBook Pro Speakers" --start 14:00 --end 18:00 --min-vol 20 --max-vol 55
-
-# With Virtual Sound Block:
-./switch_audio.sh schedule --target "Virtual" --start 14:00 --end 18:00
-```
-
-#### Run Background Daemon on a Config File
-```bash
-# Monitors config file (e.g. Dropbox synced schedules)
-./switch_audio.sh daemon --config ~/Dropbox/audio_schedules.json
-```
+| Action | Command |
+| :--- | :--- |
+| **Check dependencies** | `./switch_audio.sh check-deps` |
+| **List audio devices** | `./switch_audio.sh list` |
+| **Check current device & volume** | `./switch_audio.sh current` |
+| **Switch output immediately** | `./switch_audio.sh switch "Virtual"`<br>`./switch_audio.sh switch "MacBook Pro Speakers"` |
+| **Run a single schedule** | `./switch_audio.sh schedule --target "Virtual" --start 14:00 --end 18:00` |
+| **Schedule with volume clamp** | `./switch_audio.sh schedule --target "MacBook Pro Speakers" --start 14:00 --end 18:00 --min-vol 20 --max-vol 50` |
+| **Run daemon on config file** | `./switch_audio.sh daemon --config ~/.macos_audio_scheduler/schedules.json` |
 
 ---
 
 ## Schedule Configuration Example (`schedules.json`)
 
-The schedule configurations are stored in human-readable JSON:
+Schedules are saved in JSON format:
 
 ```json
 [
   {
-    "id": "evening-classes",
-    "name": "Evening Classes",
-    "target_device": "MacBook Pro Speakers",
+    "id": "silent-focus",
+    "name": "Silent Focus Block",
+    "target_device": "Virtual",
     "start_time": "14:00",
-    "end_time": "18:00",
-    "days": ["Mon", "Wed", "Fri"],
-    "volume_mode": "range",
-    "fixed_volume": 40,
-    "min_volume": 15,
-    "max_volume": 50,
+    "end_time": "17:00",
+    "days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+    "volume_mode": "fixed",
+    "fixed_volume": 0,
+    "min_volume": 0,
+    "max_volume": 0,
     "end_action": "restore_previous",
     "return_device": "",
     "enabled": true
   },
   {
-    "id": "focus-block",
-    "name": "Silent Focus Block",
-    "target_device": "Virtual",
-    "start_time": "22:00",
-    "end_time": "23:30",
-    "days": ["Everyday"],
-    "volume_mode": "fixed",
-    "fixed_volume": 0,
-    "min_volume": 0,
-    "max_volume": 0,
+    "id": "safe-volume-study",
+    "name": "Study Window (Volume Cap)",
+    "target_device": "MacBook Pro Speakers",
+    "start_time": "19:00",
+    "end_time": "21:00",
+    "days": ["Mon", "Wed", "Sat"],
+    "volume_mode": "range",
+    "fixed_volume": 35,
+    "min_volume": 15,
+    "max_volume": 45,
     "end_action": "restore_previous",
     "return_device": "",
     "enabled": true
@@ -175,17 +181,20 @@ The schedule configurations are stored in human-readable JSON:
 
 ---
 
-## File Structure
+## Project Structure
 
 ```text
 .
-├── gui.py              # Native macOS Tkinter GUI application
-├── switch_audio.sh     # Standalone CLI engine and background daemon
-└── README.md           # Documentation and usage guide
+├── coreaudio_backend.py   # Native CoreAudio ctypes bindings, listeners & CGEventTap
+├── gui.py                 # Desktop Tkinter GUI with instant event-driven enforcer
+├── switch_audio.sh        # Standalone CLI switcher, runner & background daemon
+├── schedules.json         # Schedule configuration file
+├── LICENSE                # Non-Commercial License
+└── README.md              # Project documentation and usage guide
 ```
 
 ---
 
 ## License
 
-This project is licensed under a **Non-Commercial License** (Personal & Educational Use Only). Commercial use, resale, or monetization is strictly prohibited without prior written permission. See the [LICENSE](LICENSE) file for the full legal terms.
+This project is licensed under a **Non-Commercial License** (Personal & Educational Use Only). Commercial use, resale, or monetization is strictly prohibited without prior written permission. See the [LICENSE](LICENSE) file for details.

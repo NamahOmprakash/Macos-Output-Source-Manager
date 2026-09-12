@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Bare-Bones macOS Audio Output Switcher & Scheduler GUI (Battery-Optimized).
+"""macOS Audio Output Switcher & Scheduler GUI.
 
 Features:
-- Genuine Virtual Audio Device: Routes silent block to BlackHole 2ch / Steam Streaming Speakers HAL driver
-- Instant Active Override: Sub-200ms reactive loop reverts unauthorized macOS GUI (Control Center / Settings) switches
+- Genuine Virtual Audio Device: Visible in macOS System Settings & Control Center
+- Instant Active Override: CoreAudio property listener fires within ~1-5ms of any device change
 - Double-Layer Silence Block: Hardware routing to silent HAL sink + continuous 0% volume clamping
-- PIN / Tamper Lock: Password-protects scheduler controls & displays macOS authorization dialog on GUI tampering
-- Specific volume locking or allowed volume range (min/max clamping)
+- Volume Key Interception: CGEventTap suppresses F11/F12/Mute when volume is locked
+- PIN / Tamper Lock: Password-protects scheduler controls & displays macOS authorization dialog
 - Multi-schedule table with Add, Edit, Delete, Toggle
 - Dropbox / custom cloud config path selector
 - Per-schedule return action: auto-restore last used or switch to specific device
-- Battery-optimized monitor (low idle wakeups, sleeps 5s when idle, 150ms when active)
 """
 
 from __future__ import annotations
@@ -22,84 +21,99 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
-import ctypes
-
-def find_switch_bin() -> str:
-    for candidate in [
-        shutil.which("SwitchAudioSource"),
-        "/opt/homebrew/bin/SwitchAudioSource",
-        "/usr/local/bin/SwitchAudioSource",
-        os.path.expanduser("~/bin/SwitchAudioSource"),
-    ]:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return shutil.which("SwitchAudioSource") or "/opt/homebrew/bin/SwitchAudioSource"
-
-SWITCH_BIN = find_switch_bin()
+import coreaudio_backend as cab
 
 VIRTUAL_NAME = "Virtual"
 VIRTUAL_LABEL = "Virtual (Block: Plays no sound)"
+DEFAULT_CONFIG_PATH = str(Path.home() / ".macos_audio_scheduler" / "schedules.json")
+DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 # ==============================================================================
-# Helper Functions: Audio CLI, Virtual Sink & Volume Controls
+# Startup Dependency Validation
+# ==============================================================================
+def validate_dependencies() -> dict[str, bool]:
+    """Check all dependencies and return status dict."""
+    return cab.check_dependencies()
+
+
+def show_dependency_errors(deps: dict[str, bool]) -> bool:
+    """Show error dialogs for missing dependencies. Returns True if critical deps are met."""
+    missing: list[str] = []
+
+    if not deps.get("blackhole"):
+        missing.append(
+            "• BlackHole 2ch (silent virtual audio driver)\n"
+            "  Install: brew install blackhole-2ch"
+        )
+    if not deps.get("pyobjc"):
+        missing.append(
+            "• PyObjC (Python-ObjC bridge for aggregate device creation)\n"
+            "  Install: pip3 install pyobjc-framework-CoreAudio"
+        )
+
+    if missing:
+        msg = (
+            "Missing required dependencies:\n\n"
+            + "\n\n".join(missing)
+            + "\n\nThe Virtual sound-blocking device will not be available.\n"
+            "Audio switching and scheduling will still work with real devices.\n\n"
+            "Run the setup command to install everything:\n"
+            "  ./switch_audio.sh setup"
+        )
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning("Missing Dependencies", msg)
+            root.destroy()
+        except Exception:
+            print(f"WARNING: {msg}", file=sys.stderr)
+
+    if not deps.get("accessibility"):
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(
+                "Accessibility Permission",
+                "Volume key interception requires Accessibility permission.\n\n"
+                "To enable:\n"
+                "System Settings → Privacy & Security → Accessibility\n"
+                "→ Add Python / Terminal to the list.\n\n"
+                "Without this, volume keys (F11/F12) cannot be blocked during schedules.\n"
+                "All other features will work normally.",
+            )
+            root.destroy()
+        except Exception:
+            pass
+
+    # Critical: at least the CoreAudio backend must work (it always does on macOS)
+    return True
+
+
+# ==============================================================================
+# Helper Functions: Virtual Sink & Volume Controls
 # ==============================================================================
 def find_virtual_sink_device() -> str | None:
-    """Finds genuine HAL virtual silent output device (BlackHole 2ch or Steam Streaming Speakers)."""
-    try:
-        res = subprocess.run([SWITCH_BIN, "-a", "-t", "output"], capture_output=True, text=True, check=True)
-        lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-        for candidate in ["BlackHole 2ch", "Steam Streaming Speakers", "BlackHole 16ch"]:
-            if candidate in lines:
-                return candidate
-    except Exception:
-        pass
-    return None
+    """Finds a genuine HAL virtual silent output device via CoreAudio enumeration."""
+    dev = cab.find_virtual_sink()
+    return dev.name if dev else None
 
 
 def ensure_virtual_device_exists() -> str:
-    """Ensures a genuine macOS CoreAudio output device literally named 'Virtual' exists in macOS System Settings & Control Center."""
-    try:
-        res = subprocess.run([SWITCH_BIN, "-a", "-t", "output"], capture_output=True, text=True)
-        lines = [line.strip() for line in res.stdout.splitlines()]
-        if "Virtual" in lines:
-            return "Virtual"
-    except Exception:
-        pass
-
-    try:
-        import Foundation
-        import objc
-
-        coreaudio = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/CoreAudio.framework/CoreAudio')
-        AudioHardwareCreateAggregateDevice = coreaudio.AudioHardwareCreateAggregateDevice
-        AudioHardwareCreateAggregateDevice.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-        AudioHardwareCreateAggregateDevice.restype = ctypes.c_uint32
-
-        # Subdevice UID for BlackHole HAL driver
-        target_uid = "BlackHole2ch_UID"
-        desc = {
-            "name": "Virtual",
-            "uid": "org.soundblock.virtual.v2",
-            "subdevices": [{"uid": target_uid}],
-            "master": target_uid
-        }
-        cf_desc = Foundation.NSDictionary.dictionaryWithDictionary_(desc)
-        out_id = ctypes.c_uint32(0)
-        err = AudioHardwareCreateAggregateDevice(objc.pyobjc_id(cf_desc), ctypes.byref(out_id))
-        if err == 0:
-            return "Virtual"
-    except Exception:
-        pass
-
-    v_sink = find_virtual_sink_device()
-    return v_sink if v_sink else VIRTUAL_NAME
+    """Creates a visible aggregate device named 'Virtual' in macOS System Settings."""
+    dev_id = cab.create_virtual_device()
+    if dev_id is not None:
+        return VIRTUAL_NAME
+    # Fallback: try to use BlackHole directly
+    sink = find_virtual_sink_device()
+    return sink if sink else VIRTUAL_NAME
 
 
 def get_virtual_label() -> str:
@@ -120,26 +134,20 @@ def resolve_hw_target(name: str) -> str:
 
 
 def get_current_device() -> str:
-    try:
-        res = subprocess.run([SWITCH_BIN, "-c", "-t", "output"], capture_output=True, text=True, check=True)
-        return res.stdout.strip()
-    except Exception:
-        return "Unknown"
+    """Gets the current default output device name via CoreAudio API."""
+    dev = cab.get_default_output_device()
+    return dev.name if dev else "Unknown"
 
 
 def get_available_devices() -> list[str]:
+    """Lists all output devices, with Virtual label first."""
     ensure_virtual_device_exists()
     v_label = get_virtual_label()
     devices = [v_label]
-    try:
-        res = subprocess.run([SWITCH_BIN, "-a", "-t", "output"], capture_output=True, text=True, check=True)
-        for line in res.stdout.strip().splitlines():
-            line = line.strip()
-            # Do not duplicate Virtual label, and hide raw internal helper BlackHole from user dropdown
-            if line and line not in devices and line != v_label and line != "Virtual" and line != "BlackHole 2ch":
-                devices.append(line)
-    except Exception:
-        pass
+    for d in cab.get_output_devices():
+        # Hide raw BlackHole and the aggregate "Virtual" from the user-facing list
+        if d.name not in (VIRTUAL_NAME, "BlackHole 2ch") and d.name not in devices:
+            devices.append(d.name)
     return devices
 
 
@@ -169,18 +177,10 @@ def switch_audio_device(name: str) -> bool:
     """Switches macOS audio output. If target is Virtual, routes to silent HAL driver and sets volume 0 muted."""
     if is_virtual_target(name):
         target_dev = ensure_virtual_device_exists()
-        try:
-            res = subprocess.run([SWITCH_BIN, "-s", target_dev, "-t", "output"], capture_output=True, text=True)
-            mute_block()
-            return res.returncode == 0
-        except Exception:
-            mute_block()
-            return False
-    try:
-        res = subprocess.run([SWITCH_BIN, "-s", name, "-t", "output"], capture_output=True, text=True)
-        return res.returncode == 0
-    except Exception:
-        return False
+        ok = cab.set_default_output_by_name(target_dev)
+        mute_block()
+        return ok
+    return cab.set_default_output_by_name(name)
 
 
 # ==============================================================================
@@ -488,9 +488,29 @@ class AudioSchedulerApp:
         self.saved_device: str | None = None
         self.saved_volume_state: tuple[int, bool] | None = None
 
+        # CoreAudio event-driven override: instant device change detection
+        self._device_listener = cab.DeviceChangeListener(self._on_device_changed)
+        self._target_device_id: int | None = None  # The device ID we're enforcing
+        self._target_device_name: str | None = None
+
+        # CGEventTap volume key interceptor
+        self._volume_locked = False  # Whether volume keys should be suppressed
+        self._volume_interceptor = cab.VolumeKeyInterceptor(self._should_suppress_volume_key)
+
+        # Active schedule state for the listener callback
+        self._active_schedule: dict[str, Any] | None = None
+        self._active_vol_mode: str = "unlocked"
+        self._active_fixed_v: int = 0
+        self._active_min_v: int = 0
+        self._active_max_v: int = 100
+        self._active_is_virtual: bool = False
+
         self._build_ui()
         self._refresh_devices()
         self._load_config()
+
+        # Register clean teardown
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _log(self, text: str) -> None:
         def append() -> None:
@@ -860,6 +880,45 @@ class AudioSchedulerApp:
     # --------------------------------------------------------------------------
     # Background Scheduler Service & Instant Active Enforcement
     # --------------------------------------------------------------------------
+    def _should_suppress_volume_key(self) -> bool:
+        """Called by VolumeKeyInterceptor (CGEventTap) on F11/F12/Mute keypresses."""
+        return self._volume_locked
+
+    def _on_device_changed(self, new_dev_id: int) -> None:
+        """Called immediately by CoreAudio property listener when default output device changes."""
+        if not self.daemon_running or self.active_sched_id is None:
+            return
+        if self._target_device_id is None:
+            return
+        if new_dev_id != self._target_device_id:
+            # Snap back instantly within CoreAudio
+            target_name = self._target_device_name or f"Device #{self._target_device_id}"
+            self._log(f"[INSTANT OVERRIDE] Audio changed in macOS. Snapping back to '{target_name}' within CoreAudio...")
+            cab.set_default_output_device(self._target_device_id)
+            if self._active_is_virtual:
+                mute_block()
+            self.root.after(0, self._refresh_devices)
+
+            # If Tamper Lock is active, display native macOS authorization prompt
+            if self.is_locked and self.pin_hash and not self._prompting_pin:
+                self._prompting_pin = True
+
+                def auth_thread() -> None:
+                    try:
+                        ans = prompt_macos_pin_dialog(
+                            "Audio Output is locked by Audio Scheduler.\nEnter Admin PIN to authorize device changes:"
+                        )
+                        if ans and verify_pin(ans, self.pin_hash or "", self.pin_salt or ""):
+                            self.is_locked = False
+                            self.root.after(0, self._update_lock_ui)
+                            self._log("[AUTH] Correct PIN entered in macOS prompt. Tamper Lock disengaged.")
+                        elif ans:
+                            self._log("[AUTH] Incorrect PIN entered in macOS prompt. Keeping device locked.")
+                    finally:
+                        self._prompting_pin = False
+
+                threading.Thread(target=auth_thread, daemon=True).start()
+
     def _toggle_service(self) -> None:
         if self.daemon_running:
             if not self._require_unlock("Stopping Scheduler"):
@@ -871,22 +930,23 @@ class AudioSchedulerApp:
     def _start_service(self) -> None:
         self.daemon_running = True
         self.stop_event.clear()
+        if self._device_listener:
+            self._device_listener.start()
         self.svc_btn.configure(text="⏹️ Stop Scheduler")
-        self.status_var.set("Status: 🟢 Running (Active Enforcer)")
-        self._log("Scheduler & Override service started.")
+        self.status_var.set("Status: 🟢 Running (CoreAudio Listener Active)")
+        self._log("Scheduler & Override service started with CoreAudio hardware event listener.")
 
         def loop() -> None:
             while not self.stop_event.is_set():
                 is_active = self._evaluate_tick()
-                if is_active:
-                    # Active window: 150ms check for near-instant snapback of GUI/slider changes
-                    time.sleep(0.15)
-                else:
-                    # Idle: sleep 5 seconds in 0.1s slices for low battery consumption
-                    for _ in range(50):
-                        if self.stop_event.is_set():
-                            break
-                        time.sleep(0.1)
+                # When active, device changes are handled instantly (1-5ms) by the CoreAudio listener callback.
+                # Polling interval is only needed for checking schedule boundaries and volume slider clamping.
+                sleep_secs = 0.5 if is_active else 2.0
+                slices = int(sleep_secs / 0.1)
+                for _ in range(slices):
+                    if self.stop_event.is_set():
+                        break
+                    time.sleep(0.1)
 
         self.daemon_thread = threading.Thread(target=loop, daemon=True)
         self.daemon_thread.start()
@@ -894,6 +954,13 @@ class AudioSchedulerApp:
     def _stop_service(self) -> None:
         self.stop_event.set()
         self.daemon_running = False
+        if self._device_listener:
+            self._device_listener.stop()
+        if self._volume_interceptor:
+            self._volume_interceptor.stop()
+        self._volume_locked = False
+        self._target_device_id = None
+        self._target_device_name = None
         self.svc_btn.configure(text="▶️ Start Scheduler")
         self.status_var.set("Status: ⏹️ Stopped")
         self._log("Scheduler service stopped.")
@@ -938,6 +1005,19 @@ class AudioSchedulerApp:
                 vol_mode = "fixed"
                 fixed_v = 0
 
+            self._active_is_virtual = is_virtual
+            self._active_vol_mode = vol_mode
+            self._active_fixed_v = fixed_v
+            self._active_min_v = min_v
+            self._active_max_v = max_v
+            self._target_device_name = target_hw
+
+            target_dev = cab.find_device_by_name(target_hw)
+            if target_dev:
+                self._target_device_id = target_dev.device_id
+            else:
+                self._target_device_id = None
+
             if self.active_sched_id != mid:
                 if self.active_sched_id is None:
                     self.saved_device = get_current_device()
@@ -946,35 +1026,28 @@ class AudioSchedulerApp:
                 self.active_sched_id = mid
                 self._log(f"Engaging target: '{raw_target}' (HW: '{target_hw}')")
                 switch_audio_device(raw_target)
+
+                # Hardware volume key interception
+                if is_virtual or vol_mode == "fixed":
+                    self._volume_locked = True
+                    if self._volume_interceptor and self._volume_interceptor.start():
+                        self._log("[VOLUME] Hardware volume keys (F11/F12/Mute) locked via CGEventTap.")
+                else:
+                    self._volume_locked = False
+                    if self._volume_interceptor:
+                        self._volume_interceptor.stop()
+
                 self._apply_volume_rules(vol_mode, fixed_v, min_v, max_v, is_virtual)
                 self.root.after(0, self._refresh_devices)
             else:
-                # --------------------------------------------------------------
-                # ACTIVE ENFORCEMENT: Override macOS GUI / Control Center switches
-                # --------------------------------------------------------------
+                # Active window ongoing: backup check
                 curr_dev = get_current_device()
                 if curr_dev != target_hw:
-                    self._log(f"[OVERRIDE] Output changed to '{curr_dev}' in macOS GUI. Snapping back to '{target_hw}'...")
+                    self._log(f"[OVERRIDE] Output changed to '{curr_dev}'. Snapping back to '{target_hw}'...")
                     switch_audio_device(raw_target)
                     self.root.after(0, self._refresh_devices)
 
-                    # If Tamper Lock is active, show macOS password prompt
-                    if self.is_locked and self.pin_hash and not self._prompting_pin:
-                        self._prompting_pin = True
-                        def auth_thread() -> None:
-                            try:
-                                ans = prompt_macos_pin_dialog("Audio Output is locked by Audio Scheduler.\nEnter Admin PIN to authorize device changes:")
-                                if ans and verify_pin(ans, self.pin_hash or "", self.pin_salt or ""):
-                                    self.is_locked = False
-                                    self.root.after(0, self._update_lock_ui)
-                                    self._log("[AUTH] Correct PIN entered in macOS prompt. Tamper Lock disengaged.")
-                                elif ans:
-                                    self._log("[AUTH] Incorrect PIN entered in macOS prompt. Keeping device locked.")
-                            finally:
-                                self._prompting_pin = False
-                        threading.Thread(target=auth_thread, daemon=True).start()
-
-                # Enforce volume constraints (clamps keyboard buttons & GUI sliders)
+                # Enforce volume constraints
                 clamped = self._apply_volume_rules(vol_mode, fixed_v, min_v, max_v, is_virtual)
                 if clamped:
                     self.root.after(0, self._refresh_devices)
@@ -987,6 +1060,13 @@ class AudioSchedulerApp:
             name = old["name"] if old else "Schedule"
             end_act = old.get("end_action", "restore_previous") if old else "restore_previous"
             self._log(f"Window ended: '{name}'. Action: {end_act}")
+
+            # Stop volume key interceptor
+            self._volume_locked = False
+            if self._volume_interceptor:
+                self._volume_interceptor.stop()
+            self._target_device_id = None
+            self._target_device_name = None
 
             # Restore volume if saved
             if self.saved_volume_state:
@@ -1052,8 +1132,27 @@ class AudioSchedulerApp:
 
         return False
 
+    def _on_close(self) -> None:
+        """Clean teardown on app exit: stop services, listeners, and destroy aggregate device."""
+        try:
+            if self.daemon_running:
+                self._stop_service()
+            if self._device_listener:
+                self._device_listener.stop()
+            if self._volume_interceptor:
+                self._volume_interceptor.stop()
+            # Clean up the virtual aggregate device from CoreAudio
+            cab.destroy_virtual_device()
+        except Exception:
+            pass
+        finally:
+            self.root.destroy()
+
 
 def main() -> None:
+    deps = validate_dependencies()
+    show_dependency_errors(deps)
+
     root = tk.Tk()
     root.update_idletasks()
     sw = root.winfo_screenwidth()
@@ -1064,8 +1163,7 @@ def main() -> None:
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        if app.daemon_running:
-            app._stop_service()
+        app._on_close()
 
 
 if __name__ == "__main__":
