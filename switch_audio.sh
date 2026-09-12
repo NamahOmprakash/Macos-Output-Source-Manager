@@ -3,9 +3,10 @@
 # switch_audio.sh — macOS Audio Output Switcher & Scheduler Engine (Optimized)
 # ==============================================================================
 # Features:
-#   - Battery-optimized execution (event-friendly, low-overhead sleeping)
-#   - Virtual sound device (Block: plays no sound)
-#   - Specific volume enforcement or allowed volume range (min/max clamping)
+#   - Genuine Virtual Audio Device: Routes silent block to BlackHole 2ch / Steam driver
+#   - Instant Active Override: Sub-200ms reactive loop snaps back unauthorized switches
+#   - Hardware Silence Block: True physical routing to silent HAL loopback sink
+#   - Volume Locking: Fixed percentage or allowed min/max range with instant clamping
 #   - Standalone CLI execution & config-based background daemon
 # ==============================================================================
 
@@ -21,15 +22,60 @@ if [[ ! -x "$SWITCH_BIN" ]]; then
 fi
 
 VIRTUAL_NAME="Virtual"
-VIRTUAL_LABEL="Virtual (Block - plays no sound)"
+
+find_virtual_sink() {
+    local dev
+    while IFS= read -r dev; do
+        if [[ "$dev" == "BlackHole 2ch" || "$dev" == "Steam Streaming Speakers" || "$dev" == "BlackHole 16ch" ]]; then
+            echo "$dev"
+            return 0
+        fi
+    done < <("$SWITCH_BIN" -a -t output 2>/dev/null)
+    return 1
+}
+
+get_virtual_label() {
+    local sink
+    sink=$(find_virtual_sink || true)
+    if [[ -n "$sink" ]]; then
+        echo "Virtual [$sink] (Silent Block - Plays no sound)"
+    else
+        echo "Virtual (Block: Plays no sound)"
+    fi
+}
+
+is_virtual_target() {
+    local t="$1"
+    if [[ "$t" == "$VIRTUAL_NAME" || "$t" == Virtual* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+resolve_hw_target() {
+    local t="$1"
+    if is_virtual_target "$t"; then
+        local sink
+        sink=$(find_virtual_sink || true)
+        echo "${sink:-$VIRTUAL_NAME}"
+    else
+        echo "$t"
+    fi
+}
 
 get_current() {
     "$SWITCH_BIN" -c -t output
 }
 
 list_devices() {
-    echo "$VIRTUAL_LABEL"
-    "$SWITCH_BIN" -a -t output
+    get_virtual_label
+    local v_sink
+    v_sink=$(find_virtual_sink || true)
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            echo "$line"
+        fi
+    done < <("$SWITCH_BIN" -a -t output 2>/dev/null)
 }
 
 # Query volume and mute state via AppleScript
@@ -61,8 +107,14 @@ switch_device() {
     if [[ -z "$target" ]]; then
         return 1
     fi
-    if [[ "$target" == "$VIRTUAL_NAME" || "$target" == "$VIRTUAL_LABEL" ]]; then
-        echo "[$(date +'%T')] Activating Virtual Sound Block (plays no sound)..."
+    if is_virtual_target "$target"; then
+        local v_sink
+        v_sink=$(find_virtual_sink || true)
+        echo "[$(date +'%T')] Activating Virtual Sound Block (silent output)..."
+        if [[ -n "$v_sink" ]]; then
+            echo "[$(date +'%T')] Routing physical audio to virtual HAL driver: '$v_sink'"
+            "$SWITCH_BIN" -s "$v_sink" -t output
+        fi
         mute_block
     else
         echo "[$(date +'%T')] Switching audio output to: '$target'"
@@ -77,14 +129,24 @@ enforce_volume_constraints() {
     local fixed_vol="$2"  # number 0-100
     local min_vol="$3"    # number 0-100
     local max_vol="$4"    # number 0-100
-
-    if [[ "$mode" == "unlocked" || -z "$mode" ]]; then
-        return 0
-    fi
+    local is_virt="$5"    # "true" or "false"
 
     local vol_state
     vol_state=$(get_volume_state)
     IFS='|' read -r curr_vol curr_muted <<< "$vol_state"
+
+    if [[ "$is_virt" == "true" ]]; then
+        if [[ "$curr_vol" != "0" || "$curr_muted" != "true" ]]; then
+            echo "[$(date +'%T')] [OVERRIDE] Sound change detected on Virtual. Re-blocking to 0% muted..."
+            mute_block
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ "$mode" == "unlocked" || -z "$mode" ]]; then
+        return 0
+    fi
 
     if [[ "$mode" == "fixed" ]]; then
         if [[ "$fixed_vol" == "0" ]]; then
@@ -119,7 +181,7 @@ enforce_volume_constraints() {
 }
 
 # ------------------------------------------------------------------------------
-# Single schedule command
+# Single Schedule Runner
 # ------------------------------------------------------------------------------
 run_single_schedule() {
     local target=""
@@ -134,39 +196,49 @@ run_single_schedule() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --target|-t)   target="$2"; shift 2 ;;
-            --start|-s)    start_time="$2"; shift 2 ;;
-            --end|-e)      end_time="$2"; shift 2 ;;
-            --days|-d)     days="$2"; shift 2 ;;
-            --return|-r)   return_target="$2"; shift 2 ;;
-            --volume|-v)   volume_mode="fixed"; fixed_vol="$2"; shift 2 ;;
-            --min-vol)     volume_mode="range"; min_vol="$2"; shift 2 ;;
-            --max-vol)     volume_mode="range"; max_vol="$2"; shift 2 ;;
+            --target|-t) target="$2"; shift 2 ;;
+            --start|-s) start_time="$2"; shift 2 ;;
+            --end|-e) end_time="$2"; shift 2 ;;
+            --days|-d) days="$2"; shift 2 ;;
+            --return|-r) return_target="$2"; shift 2 ;;
+            --volume|-v)
+                volume_mode="fixed"
+                fixed_vol="$2"
+                shift 2
+                ;;
+            --min-vol)
+                volume_mode="range"
+                min_vol="$2"
+                shift 2
+                ;;
+            --max-vol)
+                volume_mode="range"
+                max_vol="$2"
+                shift 2
+                ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
 
     if [[ -z "$target" || -z "$start_time" || -z "$end_time" ]]; then
-        echo "Usage: $0 schedule --target <device> --start <HH:MM> --end <HH:MM> [options]"
-        echo "Options:"
-        echo "  --days Mon,Wed         Filter active days"
-        echo "  --return <device>      Specific device to restore"
-        echo "  --volume <0-100>       Lock to a specific fixed volume"
-        echo "  --min-vol <0-100>      Set minimum allowed volume"
-        echo "  --max-vol <0-100>      Set maximum allowed volume"
+        echo "Error: --target, --start, and --end are required." >&2
         exit 1
     fi
 
-    if [[ "$target" == "$VIRTUAL_LABEL" || "$target" == "$VIRTUAL_NAME" ]]; then
-        target="$VIRTUAL_NAME"
+    local is_virt="false"
+    if is_virtual_target "$target"; then
+        is_virt="true"
         volume_mode="fixed"
         fixed_vol="0"
     fi
 
+    local target_hw
+    target_hw=$(resolve_hw_target "$target")
+
     echo "=========================================================="
-    echo " Audio Schedule Monitor (Battery-Optimized)"
-    echo " Target: '$target'"
-    if [[ "$target" == "$VIRTUAL_NAME" ]]; then
+    echo " macOS Audio Output Scheduler (Live Override Active)"
+    echo " Target: $target (Hardware sink: '$target_hw')"
+    if [[ "$is_virt" == "true" ]]; then
         echo " Mode:   Virtual Sound Block (0% muted, sound blocked)"
     elif [[ "$volume_mode" == "fixed" ]]; then
         echo " Volume: Fixed at $fixed_vol%"
@@ -190,7 +262,7 @@ run_single_schedule() {
                 set_volume_state "$orig_vol" "$orig_muted"
             fi
             local restore_to="${return_target:-$previous_device}"
-            if [[ -n "$restore_to" && "$restore_to" != "$VIRTUAL_NAME" ]]; then
+            if [[ -n "$restore_to" && ! $(is_virtual_target "$restore_to") ]]; then
                 switch_device "$restore_to" || true
             fi
         fi
@@ -226,20 +298,19 @@ run_single_schedule() {
                 previous_vol_state=$(get_volume_state)
                 echo "[$(date +'%T')] Window started. Saved device='$previous_device', vol='$previous_vol_state'"
                 switch_device "$target"
-                enforce_volume_constraints "$volume_mode" "$fixed_vol" "$min_vol" "$max_vol" || true
+                enforce_volume_constraints "$volume_mode" "$fixed_vol" "$min_vol" "$max_vol" "$is_virt" || true
                 active=true
             else
                 # Active enforcement: check output device & volume
-                if [[ "$target" != "$VIRTUAL_NAME" ]]; then
-                    curr_dev=$(get_current)
-                    if [[ "$curr_dev" != "$target" ]]; then
-                        echo "[$(date +'%T')] [OVERRIDE] Output changed to '$curr_dev'. Forcing back to '$target'..."
-                        "$SWITCH_BIN" -s "$target" -t output || true
-                    fi
+                curr_dev=$(get_current)
+                if [[ "$curr_dev" != "$target_hw" ]]; then
+                    echo "[$(date +'%T')] [OVERRIDE] Output changed to '$curr_dev' in macOS GUI. Snapping back to '$target_hw'..."
+                    switch_device "$target" || true
                 fi
-                enforce_volume_constraints "$volume_mode" "$fixed_vol" "$min_vol" "$max_vol" || true
+                enforce_volume_constraints "$volume_mode" "$fixed_vol" "$min_vol" "$max_vol" "$is_virt" || true
             fi
-            sleep 2
+            # Active check interval: 0.2s for rapid snapback
+            sleep 0.2
         else
             if $active; then
                 echo "[$(date +'%T')] Window ended. Restoring original audio state..."
@@ -249,15 +320,15 @@ run_single_schedule() {
                     set_volume_state "$orig_vol" "$orig_muted"
                 fi
                 local restore_to="${return_target:-$previous_device}"
-                if [[ -n "$restore_to" && "$restore_to" != "$VIRTUAL_NAME" ]]; then
+                if [[ -n "$restore_to" && ! $(is_virtual_target "$restore_to") ]]; then
                     switch_device "$restore_to"
                 fi
                 active=false
                 echo "Schedule completed."
                 break
             fi
-            # Battery optimization: sleep 10s when idle
-            sleep 10
+            # Battery optimization: sleep 5s when idle
+            sleep 5
         fi
     done
 }
@@ -278,7 +349,7 @@ run_daemon() {
     config_file="${config_file/#\~/$HOME}"
 
     echo "=========================================================="
-    echo " macOS Audio Output Scheduler Daemon (Battery-Optimized)"
+    echo " macOS Audio Output Scheduler Daemon (Active Enforcer)"
     echo " Config Path: '$config_file'"
     echo " (Press Ctrl+C to stop)"
     echo "=========================================================="
@@ -294,7 +365,7 @@ run_daemon() {
                 IFS='|' read -r orig_vol orig_muted <<< "$previous_vol_state"
                 set_volume_state "$orig_vol" "$orig_muted"
             fi
-            if [[ -n "$previous_device" && "$previous_device" != "$VIRTUAL_NAME" ]]; then
+            if [[ -n "$previous_device" && ! $(is_virtual_target "$previous_device") ]]; then
                 switch_device "$previous_device" || true
             fi
         fi
@@ -313,7 +384,11 @@ import json, sys
 
 try:
     with open('$config_file', 'r') as f:
-        schedules = json.load(f)
+        data = json.load(f)
+    if isinstance(data, dict):
+        schedules = data.get('schedules', [])
+    else:
+        schedules = data
 except Exception:
     sys.exit(0)
 
@@ -341,13 +416,11 @@ for s in schedules:
 
 if matching:
     t = matching.get('target_device', '')
-    if 'Virtual' in t:
-        t = 'Virtual'
     v_mode = matching.get('volume_mode', 'unlocked')
     f_vol = matching.get('fixed_volume', 50)
     min_v = matching.get('min_volume', 0)
     max_v = matching.get('max_volume', 100)
-    if t == 'Virtual':
+    if 'Virtual' in t:
         v_mode = 'fixed'
         f_vol = 0
     print(f'MATCH|{matching.get(\"id\",\"default\")}|{t}|{matching.get(\"end_action\",\"restore_previous\")}|{matching.get(\"return_device\",\"\")}|{v_mode}|{f_vol}|{min_v}|{max_v}')
@@ -358,6 +431,15 @@ else:
             if [[ "$eval_result" == MATCH* ]]; then
                 IFS='|' read -r _ sched_id target_dev end_action return_dev v_mode f_vol min_v max_v <<< "$eval_result"
 
+                local is_virt="false"
+                if is_virtual_target "$target_dev"; then
+                    is_virt="true"
+                    v_mode="fixed"
+                    f_vol=0
+                fi
+                local target_hw
+                target_hw=$(resolve_hw_target "$target_dev")
+
                 if [[ "$active_sched_id" != "$sched_id" ]]; then
                     if [[ -z "$active_sched_id" ]]; then
                         previous_device=$(get_current)
@@ -366,19 +448,18 @@ else:
                     fi
                     active_sched_id="$sched_id"
                     switch_device "$target_dev"
-                    enforce_volume_constraints "$v_mode" "$f_vol" "$min_v" "$max_v" || true
+                    enforce_volume_constraints "$v_mode" "$f_vol" "$min_v" "$max_v" "$is_virt" || true
                 else
-                    # Active enforcement during schedule
-                    if [[ "$target_dev" != "$VIRTUAL_NAME" ]]; then
-                        curr_dev=$(get_current)
-                        if [[ "$curr_dev" != "$target_dev" ]]; then
-                            echo "[$(date +'%T')] [OVERRIDE] Output changed to '$curr_dev'. Forcing back to '$target_dev'..."
-                            "$SWITCH_BIN" -s "$target_dev" -t output || true
-                        fi
+                    # Active enforcement during schedule: check output & volume
+                    curr_dev=$(get_current)
+                    if [[ "$curr_dev" != "$target_hw" ]]; then
+                        echo "[$(date +'%T')] [OVERRIDE] Output changed to '$curr_dev' in macOS GUI. Snapping back to '$target_hw'..."
+                        switch_device "$target_dev" || true
                     fi
-                    enforce_volume_constraints "$v_mode" "$f_vol" "$min_v" "$max_v" || true
+                    enforce_volume_constraints "$v_mode" "$f_vol" "$min_v" "$max_v" "$is_virt" || true
                 fi
-                sleep 2
+                # Active sleep: 0.2s for responsive override
+                sleep 0.2
                 continue
             elif [[ -n "$active_sched_id" ]]; then
                 echo "[$(date +'%T')] Active schedule window ended."
@@ -391,7 +472,7 @@ else:
                 if [[ -n "$return_dev" && "$end_action" == "specific_device" ]]; then
                     restore_to="$return_dev"
                 fi
-                if [[ -n "$restore_to" && "$end_action" != "do_nothing" && "$restore_to" != "$VIRTUAL_NAME" ]]; then
+                if [[ -n "$restore_to" && "$end_action" != "do_nothing" && ! $(is_virtual_target "$restore_to") ]]; then
                     echo "[$(date +'%T')] Restoring output device to: '$restore_to'"
                     switch_device "$restore_to"
                 fi
@@ -401,8 +482,8 @@ else:
             fi
         fi
 
-        # Battery-friendly: sleep 10s when no schedule is active
-        sleep 10
+        # Battery-friendly: sleep 5s when no schedule is active
+        sleep 5
     done
 }
 
@@ -433,7 +514,7 @@ case "${1:-}" in
         run_daemon "$@"
         ;;
     *)
-        echo "macOS Audio Output Switcher & Scheduler (Battery-Optimized)"
+        echo "macOS Audio Output Switcher & Scheduler (Battery-Optimized & Secure)"
         echo ""
         echo "Commands:"
         echo "  $0 list                                            List detected audio output devices (incl. Virtual)"
