@@ -63,36 +63,61 @@ Dependency Check:
 
 ## How to Grant macOS Accessibility Permission (Volume Key Interception)
 
+> [!IMPORTANT]
+> ### Crucial Note on macOS Security & Host Applications
+> macOS attributes Accessibility permissions to the **host application** (the parent program) running the Python process:
+> - **Running inside an IDE?** (e.g., **Antigravity IDE**, **Visual Studio Code**, **Cursor**, **PyCharm**):
+>   You must grant Accessibility permission to the **IDE itself** (e.g., toggle ON **Antigravity IDE** or **Visual Studio Code**).
+> - **Running inside a Terminal?** (e.g., **Terminal.app**, **iTerm2**, **Warp**, **Alacritty**):
+>   You must grant Accessibility permission to your **terminal application** (e.g., toggle ON **Terminal** or **iTerm**).
+> - **Running Python directly or as a standalone app?**
+>   You must add the **Python application bundle** directly via the `+` button in Accessibility.
+>
+> **Quick Check:** Run `./switch_audio.sh check-deps` in your terminal anytime to immediately verify whether your current environment has Accessibility granted.
+
 macOS requires **Accessibility** permission to intercept keyboard media keys (`F11`, `F12`, `Mute`) via `CGEventTap`.
 
 > [!NOTE]
 > **Is Accessibility mandatory?**
-> **No.** If Accessibility is not granted, sound blocking and instant audio device snapback still function completely. The app will simply use software volume clamping rather than hardware key suppression.
-
-### Method 1: Enable Terminal or Your IDE (Easiest & Recommended)
-
-If you run the app from **Terminal**, **iTerm**, or an IDE like **VSCode / Antigravity IDE**:
-
-1. Open **System Settings** → **Privacy & Security** → **Accessibility** (or run `open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"` in your terminal).
-2. Find your terminal application in the list (e.g., **Terminal**, **iTerm**, or your IDE).
-3. Toggle the switch **ON**.
+> **No.** If Accessibility is not granted, sound blocking to `Virtual` and instant audio device snapback still function 100%. The app will simply use continuous software volume clamping back to 0% rather than suppressing the physical keypress at the Quartz driver layer.
 
 ---
 
-### Method 2: Add Python Directly to Accessibility
+### Step-by-Step Setup Guide
 
-If running Python standalone or macOS asks for Python specifically:
+#### Method 1: Enable Your Terminal or IDE (Recommended & Quickest)
+
+1. Open **System Settings** → **Privacy & Security** → **Accessibility** (or run this shortcut in your terminal):
+   ```bash
+   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+   ```
+2. Locate the app you are using in the list:
+   - **Antigravity IDE**
+   - **Visual Studio Code**
+   - **Terminal**
+   - **iTerm**
+3. Toggle the switch next to it **ON** (blue).
+4. Restart the terminal or app if prompted.
+
+---
+
+#### Method 2: Add the Python App Directly
+
+If macOS explicitly prompts for Python, or you launch the script outside a recognized terminal:
 
 1. Open **System Settings** → **Privacy & Security** → **Accessibility**.
-2. Click the **`+`** (Add) button below the list (enter your Mac login password if prompted).
-3. In the Finder dialog that appears, press **`Cmd + Shift + G`** (Go to Folder shortcut).
-4. Paste the path to your Python application bundle and press Enter:
-   ```text
-   /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app
-   ```
-   *(Or if using Homebrew Python: `/opt/homebrew/bin/python3`)*
-5. Click **Open**.
-6. Ensure the checkbox next to **Python** is toggled **ON**.
+2. Click the **`+`** (Add) button below the application list (enter your Mac administrator password).
+3. In the Finder file selector, press **`Cmd + Shift + G`** (*Go to Folder*).
+4. Paste the path to your Python installation:
+   - **Official Python 3.14 (macOS framework):**
+     ```text
+     /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app
+     ```
+   - **Homebrew Python:**
+     ```text
+     /opt/homebrew/bin/python3
+     ```
+5. Click **Open**, and make sure the toggle switch next to **Python** is **ON**.
 
 ---
 
